@@ -1,0 +1,76 @@
+# Builds an installable Android APK in the cloud, with no Expo account needed.
+#
+# One-time setup in your GitHub repository (the "axon" repository):
+#   Settings > Secrets and variables > Actions > New repository secret
+#     Name: SUPABASE_URL        Secret: your Supabase Project URL
+#     Name: SUPABASE_ANON_KEY   Secret: your Supabase anon (publishable) key
+#   Use the anon / publishable key only. Never the service_role or secret key:
+#   this build stops if it finds one.
+#   (You can skip both secrets if you typed the two values into src/config.ts.)
+#
+# To build: Actions tab > "Build Android APK" > Run workflow. When it finishes,
+# download "axon-apk" from the bottom of the run page and unzip it.
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      EXPO_PUBLIC_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      EXPO_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      EXPO_NO_TELEMETRY: '1'
+      CI: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install packages
+        run: npm ci --legacy-peer-deps
+
+      - name: Check the Supabase settings are present and safe
+        run: |
+          if grep -q "YOUR-PROJECT-REF" src/config.ts; then
+            if [ -z "$EXPO_PUBLIC_SUPABASE_URL" ] || [ -z "$EXPO_PUBLIC_SUPABASE_ANON_KEY" ]; then
+              echo "Supabase settings are missing. In the repository go to Settings > Secrets and variables > Actions and add SUPABASE_URL and SUPABASE_ANON_KEY, or edit src/config.ts."
+              exit 1
+            fi
+          fi
+          node -e '
+            const key = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || "";
+            let secret = key.startsWith("sb_secret_");
+            try { secret = secret || JSON.parse(Buffer.from(key.split(".")[1], "base64url").toString()).role === "service_role"; } catch (e) {}
+            if (secret) { console.error("SUPABASE_ANON_KEY holds a secret (service_role) key. Use the anon or publishable key instead."); process.exit(1); }
+          '
+
+      - name: Type-check and run the tests
+        run: npm run check
+
+      - name: Create the Android project
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Build the APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a,armeabi-v7a
+
+      - name: Keep the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: axon-apk
+          path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
